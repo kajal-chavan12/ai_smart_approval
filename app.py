@@ -1,9 +1,11 @@
 from flask import Flask, request, jsonify
+from flask_cors import CORS  # Import CORS
 import joblib
 import pandas as pd
 import os
 
 app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
 
 # -------------------------------
 # PATHS
@@ -15,64 +17,77 @@ ENCODER_PATH = os.path.join(BASE_DIR, "models", "encoders.pkl")
 # -------------------------------
 # LOAD MODEL & ENCODERS
 # -------------------------------
-model = joblib.load(MODEL_PATH)
-encoders = joblib.load(ENCODER_PATH)
+# Using try-except to prevent crash if files are missing
+try:
+    model = joblib.load(MODEL_PATH)
+    encoders = joblib.load(ENCODER_PATH)
+    print("✅ AI Loan + Fraud Engine Loaded")
+except Exception as e:
+    print(f"❌ Error loading models: {e}")
 
-print("✅ AI Loan + Fraud Engine Loaded")
+# Define the exact features your model expects (update this list based on your training)
+FEATURE_COLUMNS = ["purpose", "income", "loan", "employment", "criminal"]
 
-# -------------------------------
-# HOME
-# -------------------------------
 @app.route("/")
 def home():
-    return jsonify({
-        "message": "AI-Based Smart Loan Approval Backend Running"
-    })
+    return jsonify({"message": "AI-Based Smart Loan Approval Backend Running"})
 
-# -------------------------------
-# PREDICTION + FRAUD DETECTION
-# -------------------------------
 @app.route("/predict", methods=["POST"])
 def predict():
-    data = request.json
+    try:
+        data = request.json
+        
+        # -------- FRAUD RULES (Heuristics) --------
+        fraud = False
+        fraud_reasons = []
 
-    # -------- FRAUD RULES --------
-    fraud = False
-    fraud_reasons = []
+        if data.get("criminal") == "yes":
+            fraud = True
+            fraud_reasons.append("Criminal record detected")
 
-    if data["criminal"] == "yes":
-        fraud = True
-        fraud_reasons.append("Criminal record detected")
+        # Prevent division by zero if income is 0
+        income = float(data.get("income", 1))
+        loan = float(data.get("loan", 0))
+        
+        if (loan / income) > 0.6:
+            fraud = True
+            fraud_reasons.append("High loan-to-income ratio")
 
-    if data["loan"] / data["income"] > 0.6:
-        fraud = True
-        fraud_reasons.append("High loan-to-income ratio")
+        # -------- ML PREDICTION --------
+        # 1. Convert to DataFrame
+        input_df = pd.DataFrame([data])
+        
+        # 2. Filter only relevant features (remove 'name', etc.)
+        df = input_df[FEATURE_COLUMNS].copy()
 
-    # -------- ML PREDICTION --------
-    df = pd.DataFrame([data])
+        # 3. Apply Encoders
+        for col, encoder in encoders.items():
+            if col in df.columns:
+                val = str(df[col].iloc[0])
+                # Handle unknown categories safely
+                if val not in encoder.classes_:
+                    df[col] = encoder.transform([encoder.classes_[0]])
+                else:
+                    df[col] = encoder.transform([val])
 
-    for col, encoder in encoders.items():
-        if col in df.columns:
-            if df[col][0] not in encoder.classes_:
-                df[col] = encoder.transform([encoder.classes_[0]])
-            else:
-                df[col] = encoder.transform(df[col])
+        # 4. Predict
+        prediction = int(model.predict(df)[0])
+        probabilities = model.predict_proba(df)[0]
+        confidence = float(probabilities[prediction])
 
-    prediction = int(model.predict(df)[0])
-    confidence = float(model.predict_proba(df)[0][prediction])
+        # Approval logic: must be ML-approved AND pass fraud rules
+        approved = bool(prediction == 1) and not fraud
 
-    approved = bool(prediction) and not fraud
+        return jsonify({
+            "approved": approved,
+            "score": round(confidence * 100, 1), # Send as percentage for frontend
+            "fraud": fraud,
+            "reason": " | ".join(fraud_reasons) if fraud_reasons else "Healthy fiscal profile"
+        })
 
-    return jsonify({
-        "approved": approved,
-        "confidence": round(confidence, 2),
-        "fraud": fraud,
-        "fraud_reasons": fraud_reasons
-    })
+    except Exception as e:
+        print(f"Prediction Error: {e}")
+        return jsonify({"approved": False, "score": 0, "reason": "Internal Engine Error"}), 500
 
-# -------------------------------
-# RUN SERVER
-# -------------------------------
 if __name__ == "__main__":
-    app.run(debug=True)
-
+    app.run(debug=True, port=5000)
