@@ -77,3 +77,4 @@ joblib.dump(label_encoders, "models/encoders.joblib")
 
 print("💾 Model saved → models/loan_model.joblib")
 print("🎉 TRAINING COMPLETE")
+
